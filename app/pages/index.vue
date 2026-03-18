@@ -1,0 +1,317 @@
+<script setup lang="ts">
+const inputRef = ref<HTMLInputElement | null>(null)
+const editor = useImageEditor()
+const isBusy = computed(() => editor.status.value === 'detecting' || editor.status.value === 'processing')
+const entries = computed(() => editor.uploadEntries.value)
+
+function formatMode(mode: 'client' | 'server') {
+  return mode === 'client' ? 'dans le navigateur' : 'sur le serveur'
+}
+
+function formatRemainingTime(remainingMs: number | null) {
+  if (remainingMs === null) {
+    return ''
+  }
+
+  const totalSeconds = Math.max(1, Math.round(remainingMs / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+
+  if (minutes === 0) {
+    return `${seconds}s restantes`
+  }
+
+  return `${minutes} min ${String(seconds).padStart(2, '0')}s restantes`
+}
+
+function formatDuration(durationMs: number | null) {
+  if (durationMs === null) {
+    return ''
+  }
+
+  const totalSeconds = durationMs / 1000
+
+  if (totalSeconds < 10) {
+    return `${totalSeconds.toFixed(1)}s`
+  }
+
+  if (totalSeconds < 60) {
+    return `${Math.round(totalSeconds)}s`
+  }
+
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = Math.round(totalSeconds % 60)
+
+  if (seconds === 60) {
+    return `${minutes + 1} min`
+  }
+
+  if (seconds === 0) {
+    return `${minutes} min`
+  }
+
+  return `${minutes} min ${String(seconds).padStart(2, '0')}s`
+}
+
+async function onFileChange(event: Event) {
+  const target = event.target as HTMLInputElement
+  const nextFile = target.files?.[0]
+
+  if (!nextFile) {
+    return
+  }
+
+  await editor.loadFile(nextFile)
+  target.value = ''
+}
+
+function openPicker() {
+  inputRef.value?.click()
+}
+
+function isCurrentEntry(entryId: string) {
+  return editor.currentEntryId.value === entryId
+}
+</script>
+
+<template>
+  <main class="mx-auto flex min-h-screen max-w-7xl flex-col gap-8 px-4 py-8 sm:px-6 lg:px-8">
+    <UModal
+      v-model:open="editor.safariVideoModalOpen.value"
+      title="Safari, c'est guez"
+      :dismissible="true"
+      :ui="{ footer: 'justify-end' }"
+    >
+      <template #body>
+        <p class="text-sm text-muted">
+          Safari est nul pour l encodage video dans le navigateur. Pour les videos, Solifloute force donc le mode serveur sur Safari.
+        </p>
+        <p class="mt-3 text-sm text-muted">
+          Si vous voulez vraiment le mode navigateur, utilisez Chrome ou Firefox. Sinon, restez en mode serveur ici.
+        </p>
+      </template>
+
+      <template #footer>
+        <UButton
+          color="neutral"
+          variant="outline"
+          @click="editor.closeSafariVideoModal"
+        >
+          Rester en mode serveur
+        </UButton>
+        <UButton
+          href="https://www.google.com/chrome/"
+          target="_blank"
+          rel="noreferrer"
+          color="primary"
+        >
+          Utiliser Chrome
+        </UButton>
+      </template>
+    </UModal>
+
+    <section class="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+      <div class="border border-default bg-muted pt-8 p-6">
+        <h1 class="max-w-3xl text-5xl leading-none sm:text-6xl">
+          SoliFloute
+        </h1>
+        <p class="mt-4 max-w-2xl text-lg text-muted">
+          Les vidéos sont conservées un maximum de 24 heures. Le traitement est effectué directement dans votre navigateur ou sur notre serveur, selon votre choix. Aucune donnée n'est collectée ou partagée.
+        </p>
+
+        <div class="mt-8 flex flex-wrap items-center gap-3">
+          <UButton
+            size="xl"
+            color="primary"
+            @click="openPicker"
+          >
+            Importer un media
+          </UButton>
+          <UButton
+            size="xl"
+            color="neutral"
+            variant="outline"
+            :disabled="!editor.file.value || isBusy"
+            @click="editor.processImage"
+          >
+            Traiter le media
+          </UButton>
+          <UButton
+            size="xl"
+            color="neutral"
+            variant="ghost"
+            :disabled="!editor.file.value"
+            @click="editor.clear"
+          >
+            Reinitialiser
+          </UButton>
+        </div>
+
+        <input
+          ref="inputRef"
+          type="file"
+          accept="image/*,video/*"
+          class="hidden"
+          @change="onFileChange"
+        >
+      </div>
+
+      <SettingsPanel
+        v-model="editor.settings"
+        :active-mode="editor.activeMode.value"
+        :detected-count="editor.faces.value.length"
+      />
+    </section>
+
+    <section
+      v-if="entries.length === 0"
+      class="border border-dashed border-default bg-muted p-8 text-center text-muted"
+    >
+      Veuillez importer un media.
+    </section>
+
+    <section
+      v-for="entry in entries"
+      :key="entry.id"
+      class="grid gap-6 xl:grid-cols-2"
+    >
+      <UCard>
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-2xl">
+                {{ entry.mediaKind === 'video' ? 'Apercu source' : 'Overlay de detection' }}
+              </h2>
+              <p class="text-xs text-(--ui-text-dimmed)">
+                {{ entry.fileName }}
+              </p>
+            </div>
+
+            <UBadge
+              v-if="entry.mediaKind === 'image' && entry.lastDurationMs !== null"
+              color="neutral"
+              variant="subtle"
+            >
+              {{ formatDuration(entry.lastDurationMs) }}
+            </UBadge>
+          </div>
+        </template>
+
+        <div class="space-y-4">
+          <FaceOverlay
+            v-if="entry.mediaKind === 'image'"
+            :src="entry.originalPreviewUrl"
+            :faces="entry.faces"
+            :excluded-face-ids="isCurrentEntry(entry.id) ? editor.settings.excludedFaceIds : []"
+            @toggle="(faceId) => isCurrentEntry(entry.id) && editor.toggleExcludedFace(faceId)"
+            @create="(face) => isCurrentEntry(entry.id) && editor.addManualFace(face)"
+          />
+
+          <video
+            v-else
+            :src="entry.originalPreviewUrl"
+            controls
+            class="block w-full border border-(--ui-border)"
+          />
+
+          <p class="text-sm text-(--ui-text-muted)">
+            {{ entry.mediaKind === 'image'
+              ? 'Cliquez sur un cadre pour l exclure du floutage, ou tracez une zone manuelle directement sur l image.'
+              : `Le mode video traite les images une par une ${formatMode(editor.activeMode.value)}.` }}
+          </p>
+        </div>
+      </UCard>
+
+      <UCard>
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <h2 class="text-2xl">
+              Apercu traite
+            </h2>
+
+            <div class="flex items-center gap-3">
+              <UBadge
+                v-if="entry.mediaKind === 'video' && entry.lastDurationMs !== null"
+                color="neutral"
+                variant="subtle"
+              >
+                {{ formatDuration(entry.lastDurationMs) }}
+              </UBadge>
+
+              <UButton
+                v-if="entry.processedPreviewUrl"
+                :href="entry.processedPreviewUrl"
+                :download="entry.mediaKind === 'video' ? 'visages-floutes.mp4' : 'visages-floutes.png'"
+                color="primary"
+                variant="soft"
+              >
+                Telecharger
+              </UButton>
+            </div>
+          </div>
+        </template>
+
+        <div
+          v-if="entry.processedPreviewUrl"
+          class="space-y-4"
+        >
+          <img
+            v-if="entry.mediaKind === 'image'"
+            :src="entry.processedPreviewUrl"
+            alt="Apercu de l image traitee"
+            class="block w-full border border-(--ui-border)"
+          >
+
+          <video
+            v-else
+            :src="entry.processedPreviewUrl"
+            controls
+            class="block w-full border border-(--ui-border)"
+          />
+        </div>
+
+        <div
+          v-else
+          class="space-y-3 border border-dashed border-(--ui-border) bg-(--ui-bg-muted) p-6"
+        >
+          <div
+            v-if="entry.processingProgress !== null"
+            class="space-y-2"
+          >
+            <div class="h-2 w-full overflow-hidden bg-(--ui-bg-elevated)">
+              <div
+                class="h-full bg-(--color-solired-500) transition-all"
+                :style="{ width: `${Math.round(entry.processingProgress * 100)}%` }"
+              />
+            </div>
+            <p class="text-sm text-(--ui-text-muted)">
+              Progression : {{ Math.round(entry.processingProgress * 100) }}%
+            </p>
+            <p
+              v-if="entry.estimatedRemainingMs !== null"
+              class="text-sm text-(--ui-text-dimmed)"
+            >
+              Temps restant estimé : {{ formatRemainingTime(entry.estimatedRemainingMs) }}
+            </p>
+          </div>
+
+          <p
+            v-else
+            class="text-sm text-(--ui-text-muted)"
+          >
+            {{ entry.mediaKind === 'video'
+              ? `La video sera traitee ${formatMode(editor.activeMode.value)}.`
+              : `Le mode automatique choisit actuellement un traitement ${formatMode(editor.activeMode.value)}.` }}
+          </p>
+
+          <p
+            v-if="entry.error"
+            class="text-sm text-(--ui-text-toned)"
+          >
+            {{ entry.error }}
+          </p>
+        </div>
+      </UCard>
+    </section>
+  </main>
+</template>

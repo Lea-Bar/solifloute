@@ -1,0 +1,57 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+:root {
+  --ui-text-dimmed: #7c6f62;
+  --ui-text-muted: #62584d;
+  --ui-text-toned: #62584d;
+  --ui-text: #2c241f;
+  --ui-text-highlighted: #140f0c;
+  --ui-text-inverted: #ffffff;
+  --ui-bg: #f6f1ea;
+  --ui-bg-muted: #ede4d9;
+  --ui-bg-elevated: #e3d5c5;
+  --ui-bg-accented: #d8c4ae;
+  --ui-bg-inverted: #1d1712;
+  --ui-border: rgba(44, 36, 31, 0.16);
+  --ui-border-muted: rgba(44, 36, 31, 0.22);
+  --ui-border-accented: rgba(44, 36, 31, 0.3);
+  --ui-border-inverted: rgba(255, 255, 255, 0.2);
+  --ui-radius: 0;
+  --font-sans: 'Lexend', 'Apple Color Emoji', sans-serif;
+  --font-serif: 'Scotchlidaires', Georgia, serif;
+  --color-solired-50: #fff3f0;
+  --color-solired-100: #ffe1d9;
+  --color-solired-200: #ffc1af;
+  --color-solired-300: #ff9a7c;
+  --color-solired-400: #f56b47;
+  --color-solired-500: #d20808;
+  --color-solired-600: #b90707;
+  --color-solired-700: #8b0505;
+  --color-solired-800: #650404;
+  --color-solired-900: #440303;
+  --color-solired-950: #2d0202;
+}
+
+@font-face {
+  font-family: 'Scotchlidaires';
+  src: url('/Scotchlidaires.ttf') format('truetype');
+  font-display: swap;
+}
+
+html,
+body,
+#__nuxt {
+  min-height: 100%;
+}
+
+body {
+  color: var(--ui-text);
+  font-family: var(--font-sans);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-serif);
+}
