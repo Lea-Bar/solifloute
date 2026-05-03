@@ -1,7 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import { promisify } from 'node:util'
 import type { EditorSettings } from '~~/shared/types/faces'
@@ -17,6 +16,7 @@ import { useFaceDetector } from '~~/shared/utils/useFaceDetector'
 
 const execFileAsync = promisify(execFile)
 const SERVER_MODEL_PATH = `${process.cwd()}/public/models/version-RFB-640.onnx`
+const VIDEO_OUTPUT_ROOT = process.env.PROCESS_VIDEO_OUTPUT_DIR || join(process.cwd(), '.data', 'video-results')
 const detector = useFaceDetector(SERVER_MODEL_PATH)
 
 interface VideoMetadata {
@@ -29,6 +29,16 @@ interface VideoMetadata {
 interface ProcessVideoResult {
   outputPath: string
   tempRoot: string
+}
+
+function createAbortError() {
+  return new Error('Traitement video annule.')
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw createAbortError()
+  }
 }
 
 function getFfmpegPath() {
@@ -69,10 +79,24 @@ function captureTextStream(stream: NodeJS.ReadableStream | null) {
   return () => output.trim()
 }
 
-function waitForProcess(child: ReturnType<typeof spawn>, fallbackMessage: string, readStderr: () => string) {
+function waitForProcess(child: ReturnType<typeof spawn>, fallbackMessage: string, readStderr: () => string, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
+    const handleAbort = () => {
+      child.kill('SIGKILL')
+      reject(createAbortError())
+    }
+
+    signal?.addEventListener('abort', handleAbort, { once: true })
+
     child.once('error', reject)
     child.once('close', (code) => {
+      signal?.removeEventListener('abort', handleAbort)
+
+      if (signal?.aborted) {
+        reject(createAbortError())
+        return
+      }
+
       if (code === 0) {
         resolve()
         return
@@ -92,7 +116,8 @@ async function silenceProcess(
   await done.catch(() => {})
 }
 
-async function readVideoMetadata(inputPath: string): Promise<VideoMetadata> {
+async function readVideoMetadata(inputPath: string, signal?: AbortSignal): Promise<VideoMetadata> {
+  throwIfAborted(signal)
   const { stdout } = await execFileAsync(getFfprobePath(), [
     '-v',
     'error',
@@ -103,7 +128,7 @@ async function readVideoMetadata(inputPath: string): Promise<VideoMetadata> {
     '-of',
     'json',
     inputPath
-  ])
+  ], { signal })
   const parsed = JSON.parse(stdout) as {
     streams?: Array<{ width?: number, height?: number, avg_frame_rate?: string, nb_frames?: string }>
     format?: { duration?: string }
@@ -126,7 +151,8 @@ async function readVideoMetadata(inputPath: string): Promise<VideoMetadata> {
   return { width, height, fps, frameCount }
 }
 
-async function writeFrame(stdin: NodeJS.WritableStream, frame: Uint8ClampedArray) {
+async function writeFrame(stdin: NodeJS.WritableStream, frame: Uint8ClampedArray, signal?: AbortSignal) {
+  throwIfAborted(signal)
   const buffer = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength)
 
   if (stdin.write(buffer)) {
@@ -134,6 +160,7 @@ async function writeFrame(stdin: NodeJS.WritableStream, frame: Uint8ClampedArray
   }
 
   await once(stdin, 'drain')
+  throwIfAborted(signal)
 }
 
 async function detectFacesFromPixels(
@@ -150,7 +177,8 @@ async function detectFacesFromPixels(
   return detection.faces
 }
 
-async function readFramePixels(inputPath: string, metadata: VideoMetadata, frameIndex: number) {
+async function readFramePixels(inputPath: string, metadata: VideoMetadata, frameIndex: number, signal?: AbortSignal) {
+  throwIfAborted(signal)
   const { stdout } = await execFileAsync(getFfmpegPath(), [
     '-hide_banner',
     '-loglevel',
@@ -170,7 +198,8 @@ async function readFramePixels(inputPath: string, metadata: VideoMetadata, frame
     'pipe:1'
   ], {
     encoding: 'buffer',
-    maxBuffer: Math.max(1024 * 1024, metadata.width * metadata.height * 4 * 2)
+    maxBuffer: Math.max(1024 * 1024, metadata.width * metadata.height * 4 * 2),
+    signal
   })
 
   const frameBuffer = stdout instanceof Buffer ? stdout : Buffer.from(stdout)
@@ -187,8 +216,10 @@ async function detectSampledFaces(
   inputPath: string,
   metadata: VideoMetadata,
   settings: EditorSettings,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  signal?: AbortSignal
 ) {
+  throwIfAborted(signal)
   const frameSize = metadata.width * metadata.height * 4
   const detectionIntervalFrames = getDetectionIntervalFrames(metadata.fps, settings)
   const expectedSampleCount = Math.max(1, Math.ceil(metadata.frameCount / detectionIntervalFrames))
@@ -216,22 +247,25 @@ async function detectSampledFaces(
   }
 
   const readDecoderError = captureTextStream(decoder.stderr)
-  const decoderDone = waitForProcess(decoder, 'Le decodage video a echoue.', readDecoderError)
+  const decoderDone = waitForProcess(decoder, 'Le decodage video a echoue.', readDecoderError, signal)
   let remainder = Buffer.alloc(0)
   let frameIndex = 0
 
   async function detectFacesAtFrame(targetFrameIndex: number) {
+    throwIfAborted(signal)
     const cachedPixels = frameCache.get(targetFrameIndex)
-    const pixels = cachedPixels || await readFramePixels(inputPath, metadata, targetFrameIndex)
+    const pixels = cachedPixels || await readFramePixels(inputPath, metadata, targetFrameIndex, signal)
 
     return await detectFacesFromPixels(pixels, metadata, settings.confidenceThreshold)
   }
 
   try {
     for await (const chunk of decoder.stdout) {
+      throwIfAborted(signal)
       remainder = Buffer.concat([remainder, chunk as Buffer])
 
       while (remainder.length >= frameSize) {
+        throwIfAborted(signal)
         const frameBuffer = remainder.subarray(0, frameSize)
         remainder = remainder.subarray(frameSize)
         const framePixels = new Uint8ClampedArray(frameBuffer)
@@ -275,17 +309,22 @@ export async function processVideoToFile(
   inputBuffer: Buffer,
   fileName: string,
   settings: EditorSettings,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  signal?: AbortSignal
 ): Promise<ProcessVideoResult> {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'solifloute-video-'))
+  throwIfAborted(signal)
+  await mkdir(VIDEO_OUTPUT_ROOT, { recursive: true })
+  const tempRoot = await mkdtemp(join(VIDEO_OUTPUT_ROOT, 'job-'))
   const inputPath = join(tempRoot, `input${getInputExtension(fileName)}`)
   const outputPath = join(tempRoot, 'output.mp4')
 
   try {
+    throwIfAborted(signal)
     await writeFile(inputPath, inputBuffer)
-    const metadata = await readVideoMetadata(inputPath)
+    const metadata = await readVideoMetadata(inputPath, signal)
     const frameSize = metadata.width * metadata.height * 4
-    const samples = await detectSampledFaces(inputPath, metadata, settings, onProgress)
+    const samples = await detectSampledFaces(inputPath, metadata, settings, onProgress, signal)
+    throwIfAborted(signal)
     const resolveFaces = createVideoFaceResolver(samples, metadata.fps)
     const decoder = spawn(getFfmpegPath(), [
       '-hide_banner',
@@ -341,16 +380,18 @@ export async function processVideoToFile(
 
     const readDecoderError = captureTextStream(decoder.stderr)
     const readEncoderError = captureTextStream(encoder.stderr)
-    const decoderDone = waitForProcess(decoder, 'Le decodage video a echoue.', readDecoderError)
-    const encoderDone = waitForProcess(encoder, 'L encodage video a echoue.', readEncoderError)
+    const decoderDone = waitForProcess(decoder, 'Le decodage video a echoue.', readDecoderError, signal)
+    const encoderDone = waitForProcess(encoder, 'L encodage video a echoue.', readEncoderError, signal)
     let frameIndex = 0
     let remainder = Buffer.alloc(0)
 
     try {
       for await (const chunk of decoder.stdout) {
+        throwIfAborted(signal)
         remainder = Buffer.concat([remainder, chunk as Buffer])
 
         while (remainder.length >= frameSize) {
+          throwIfAborted(signal)
           const frameBuffer = remainder.subarray(0, frameSize)
           remainder = remainder.subarray(frameSize)
           const processed = blurVideoFrame(
@@ -364,7 +405,7 @@ export async function processVideoToFile(
             frameIndex
           )
 
-          await writeFrame(encoder.stdin, processed)
+          await writeFrame(encoder.stdin, processed, signal)
           onProgress?.(getFrameProcessingProgress(frameIndex, metadata.frameCount))
           frameIndex += 1
         }

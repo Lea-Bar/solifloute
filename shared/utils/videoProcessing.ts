@@ -77,7 +77,8 @@ export function blurVideoFrame(
   return applyBlurEffects(
     frame,
     expandVideoBlurFaces(resolveFaces(frameIndex)),
-    settings.excludedFaceIds
+    settings.excludedFaceIds,
+    settings.blurIntensity
   )
 }
 

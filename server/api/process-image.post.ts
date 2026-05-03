@@ -31,7 +31,7 @@ async function blurImage(payload: ProcessImagePayload) {
   const allFaces = [...result.faces, ...(payload.manualFaces || [])]
 
   return await sharp(
-    Buffer.from(applyBlurEffects(image, allFaces, payload.settings.excludedFaceIds)),
+    Buffer.from(applyBlurEffects(image, allFaces, payload.settings.excludedFaceIds, payload.settings.blurIntensity)),
     {
       raw: {
         width: image.width,

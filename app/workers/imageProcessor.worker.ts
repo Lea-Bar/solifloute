@@ -39,7 +39,8 @@ async function processImage(imageData: ImageData, settings: EditorSettings, mode
     applyBlurEffects(
       { data: imageData.data, width: imageData.width, height: imageData.height },
       allFaces,
-      settings.excludedFaceIds
+      settings.excludedFaceIds,
+      settings.blurIntensity
     ),
     imageData.width,
     imageData.height

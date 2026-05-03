@@ -1,7 +1,7 @@
 import type { EditorSettings } from '~~/shared/types/faces'
 import { getOrCreateClientId } from '../utils/job-client'
 import { processVideoToFile } from '../utils/process-video'
-import { completeJob, createJob, enqueueJob, failJob, updateJobProgress } from '../utils/video-jobs'
+import { cancelJob, completeJob, createJob, enqueueJob, failJob, updateJobProgress } from '../utils/video-jobs'
 
 interface MultipartField {
   name?: string
@@ -49,19 +49,28 @@ export default defineEventHandler(async (event) => {
   }
 
   const settings = readSettingsField(settingsPart?.data)
-  const jobId = createJob({
-    ownerId,
-    fileName: filePart.filename,
-    mimeType: 'video/mp4'
-  })
+  let jobId = ''
 
-  enqueueJob(jobId, async () => {
+  try {
+    jobId = createJob({
+      ownerId,
+      fileName: filePart.filename,
+      mimeType: 'video/mp4'
+    })
+  } catch (error) {
+    throw createError({
+      statusCode: 429,
+      statusMessage: error instanceof Error ? error.message : 'Trop de traitements video sont deja en attente.'
+    })
+  }
+
+  enqueueJob(jobId, async (signal) => {
     const startedAt = Date.now()
 
     try {
       const { outputPath, tempRoot } = await processVideoToFile(filePart.data!, filePart.filename!, settings, (progress) => {
         updateJobProgress(jobId, progress)
-      })
+      }, signal)
 
       completeJob(jobId, {
         outputPath,
@@ -70,6 +79,11 @@ export default defineEventHandler(async (event) => {
         mimeType: 'video/mp4'
       })
     } catch (error) {
+      if (signal.aborted) {
+        await cancelJob(jobId)
+        return
+      }
+
       await failJob(jobId, error instanceof Error ? error.message : 'Le traitement de la video a echoue.')
     }
   })

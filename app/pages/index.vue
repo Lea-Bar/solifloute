@@ -137,6 +137,15 @@ function isCurrentEntry(entryId: string) {
             Traiter le media
           </UButton>
           <UButton
+            v-if="editor.status.value === 'processing' && editor.mediaKind.value === 'video'"
+            size="xl"
+            color="neutral"
+            variant="outline"
+            @click="editor.cancelVideoProcessing"
+          >
+            Annuler
+          </UButton>
+          <UButton
             size="xl"
             color="neutral"
             variant="ghost"
@@ -278,6 +287,12 @@ function isCurrentEntry(entryId: string) {
             v-if="entry.processingProgress !== null"
             class="space-y-2"
           >
+            <p
+              v-if="entry.processingMessage"
+              class="text-sm font-medium text-(--ui-text)"
+            >
+              {{ entry.processingMessage }}
+            </p>
             <div class="h-2 w-full overflow-hidden bg-(--ui-bg-elevated)">
               <div
                 class="h-full bg-(--color-solired-500) transition-all"

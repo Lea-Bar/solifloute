@@ -58,6 +58,13 @@ async function loadSession(modelPath: string) {
 
 export function useFaceDetector(modelPath = DEFAULT_MODEL_PATH) {
   return {
+    async warmup() {
+      await Promise.all([
+        getOrt(),
+        loadSession(modelPath)
+      ])
+    },
+
     async detectFaces(
       input: DetectionInput,
       probabilityThreshold = DEFAULT_PROBABILITY_THRESHOLD

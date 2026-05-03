@@ -4,17 +4,19 @@ import { useFaceDetector } from '~~/shared/utils/useFaceDetector'
 import { fileToBase64, fileToImageData, imageDataToDetectionInput, imageDataToObjectUrl } from '~/utils/image-io'
 import { inferProcessingTarget } from '~/utils/machine-profile'
 import { processVideoInBrowser } from '~/utils/video-browser'
+import type { BrowserVideoProgress } from '~/utils/video-browser'
 
 const MODEL_URL = '/models/version-RFB-640.onnx'
 
 const DEFAULT_SETTINGS: EditorSettings = {
   confidenceThreshold: 0.2,
   detectionIntervalSeconds: 1,
+  blurIntensity: 0.5,
   processingMode: 'auto',
   excludedFaceIds: []
 }
 
-type EditorStatus = 'idle' | 'detecting' | 'processing' | 'ready' | 'error'
+type EditorStatus = 'idle' | 'detecting' | 'processing' | 'ready' | 'error' | 'cancelled'
 type MediaKind = 'image' | 'video'
 
 interface UploadEntry {
@@ -29,6 +31,7 @@ interface UploadEntry {
   error: string
   lastDurationMs: number | null
   processingProgress: number | null
+  processingMessage: string
   estimatedRemainingMs: number | null
 }
 
@@ -55,7 +58,7 @@ interface WorkerError {
 
 interface VideoJobResponse {
   id: string
-  status: 'queued' | 'processing' | 'completed' | 'error'
+  status: 'queued' | 'processing' | 'completed' | 'error' | 'cancelled'
   progress: number
   error: string
   downloadUrl: string | null
@@ -99,6 +102,7 @@ export function useImageEditor() {
   const settings = reactive<EditorSettings>({ ...DEFAULT_SETTINGS })
   const autoResolvedMode = ref<Exclude<ProcessingMode, 'auto'>>('client')
   const processingStartedAt = ref<number | null>(null)
+  const currentServerVideoJobId = ref<string | null>(null)
   const safariVideoModalOpen = ref(false)
   const isSafari = isSafariBrowser()
   const clientDetector = import.meta.client ? useFaceDetector(MODEL_URL) : null
@@ -133,6 +137,7 @@ export function useImageEditor() {
   const originalPreviewUrl = computed(() => currentEntry.value?.originalPreviewUrl ?? '')
   const processedPreviewUrl = computed(() => currentEntry.value?.processedPreviewUrl ?? '')
   const processingProgress = computed(() => currentEntry.value?.processingProgress ?? null)
+  const processingMessage = computed(() => currentEntry.value?.processingMessage ?? '')
   const estimatedRemainingMs = computed(() => currentEntry.value?.estimatedRemainingMs ?? null)
 
   function revokeUrl(url: string) {
@@ -167,20 +172,29 @@ export function useImageEditor() {
     })
   }
 
-  function updateProgress(progress: number | null) {
-    const normalizedProgress = clampProgress(progress)
+  function updateProgress(progress: number | BrowserVideoProgress | null, message = '') {
+    const progressValue = progress && typeof progress === 'object' ? progress.progress : progress
+    const nextMessage = progress && typeof progress === 'object' ? progress.message : message
+    const shouldEstimate = !nextMessage.includes('dependances navigateur')
+      && !nextMessage.includes('FFmpeg WebAssembly')
+      && !nextMessage.includes('FFmpeg navigateur')
+      && !nextMessage.includes('modele IA')
+    const normalizedProgress = clampProgress(progressValue)
     const startedAt = processingStartedAt.value
     const remainingMs = (
       startedAt
       && normalizedProgress !== null
       && normalizedProgress > 0
       && normalizedProgress < 1
+      && normalizedProgress >= 0.16
+      && shouldEstimate
     )
       ? Math.max(0, ((Date.now() - startedAt) / normalizedProgress) - (Date.now() - startedAt))
       : null
 
     updateCurrentEntry({
       processingProgress: normalizedProgress,
+      processingMessage: normalizedProgress === null ? '' : nextMessage,
       estimatedRemainingMs: remainingMs
     })
   }
@@ -200,6 +214,7 @@ export function useImageEditor() {
     return {
       confidenceThreshold: settings.confidenceThreshold,
       detectionIntervalSeconds: settings.detectionIntervalSeconds,
+      blurIntensity: settings.blurIntensity,
       processingMode: settings.processingMode,
       excludedFaceIds: [...settings.excludedFaceIds]
     }
@@ -225,7 +240,8 @@ export function useImageEditor() {
       applyBlurEffects(
         imageDataToDetectionInput(imageData),
         nextFaces,
-        settings.excludedFaceIds
+        settings.excludedFaceIds,
+        settings.blurIntensity
       ),
       imageData.width,
       imageData.height
@@ -411,7 +427,7 @@ export function useImageEditor() {
     const startedAt = Date.now()
     processingStartedAt.value = startedAt
     setStatus('processing')
-    updateProgress(0)
+    updateProgress(0, 'Preparation du traitement video.')
 
     try {
       let blob: Blob | null = null
@@ -425,11 +441,12 @@ export function useImageEditor() {
           method: 'POST',
           body
         })
+        currentServerVideoJobId.value = jobId
 
         while (runId === videoRunId) {
           const job = await $fetch<VideoJobResponse>(`/api/process-jobs/${jobId}`)
 
-          updateProgress(job.progress)
+          updateProgress(job.progress, 'Traitement video sur le serveur.')
 
           if (job.status === 'completed') {
             const downloadUrl = job.downloadUrl || `/api/process-jobs/${jobId}/download`
@@ -445,6 +462,10 @@ export function useImageEditor() {
 
           if (job.status === 'error') {
             throw new Error(job.error || 'Le traitement de la video a echoue.')
+          }
+
+          if (job.status === 'cancelled') {
+            throw new Error(job.error || 'Traitement annule.')
           }
 
           await new Promise(resolve => setTimeout(resolve, 500))
@@ -478,8 +499,30 @@ export function useImageEditor() {
     } finally {
       if (runId === videoRunId) {
         processingStartedAt.value = null
+        currentServerVideoJobId.value = null
         updateProgress(null)
       }
+    }
+  }
+
+  async function cancelVideoProcessing() {
+    videoRunId += 1
+    const jobId = currentServerVideoJobId.value
+    currentServerVideoJobId.value = null
+    processingStartedAt.value = null
+    updateProgress(null)
+    setStatus('cancelled', 'Traitement annule.')
+
+    if (!jobId) {
+      return
+    }
+
+    try {
+      await $fetch(`/api/process-jobs/${jobId}`, {
+        method: 'DELETE'
+      })
+    } catch {
+      // The local cancellation should remain effective even if the job already ended server-side.
     }
   }
 
@@ -512,6 +555,10 @@ export function useImageEditor() {
   }
 
   async function loadFile(nextFile: File) {
+    if (status.value === 'processing') {
+      await cancelVideoProcessing()
+    }
+
     videoRunId += 1
     detectRunId += 1
     file.value = nextFile
@@ -534,21 +581,31 @@ export function useImageEditor() {
       error: '',
       lastDurationMs: null,
       processingProgress: null,
+      processingMessage: '',
       estimatedRemainingMs: null
     })
 
-    autoResolvedMode.value = await inferProcessingTarget(nextFile.size)
+    const inferredMode = await inferProcessingTarget(nextFile.size)
+    autoResolvedMode.value = mediaKind === 'video' && (nextFile.size > 12 * 1024 * 1024 || inferredMode !== 'client')
+      ? 'server'
+      : inferredMode
     safariVideoModalOpen.value = mediaKind === 'video' && isSafari
 
     if (mediaKind === 'video') {
-      return
+      return entryId
     }
 
     originalImageData.value = await fileToImageData(nextFile)
     await detectFaces()
+
+    return entryId
   }
 
   function clear() {
+    if (status.value === 'processing') {
+      void cancelVideoProcessing()
+    }
+
     videoRunId += 1
     detectRunId += 1
     file.value = null
@@ -605,7 +662,7 @@ export function useImageEditor() {
   })
 
   watch(
-    () => [settings.processingMode, settings.excludedFaceIds.join('|')],
+    () => [settings.processingMode, settings.blurIntensity, settings.excludedFaceIds.join('|')],
     async () => {
       if (
         mediaKind.value !== 'image'
@@ -656,6 +713,7 @@ export function useImageEditor() {
     processedPreviewUrl,
     processingProgress,
     estimatedRemainingMs,
+    processingMessage,
     lastDurationMs,
     safariVideoModalOpen,
     isSafariVideoForcedToServer,
@@ -663,6 +721,7 @@ export function useImageEditor() {
     clear,
     detectFaces,
     processImage,
+    cancelVideoProcessing,
     toggleExcludedFace,
     addManualFace,
     closeSafariVideoModal

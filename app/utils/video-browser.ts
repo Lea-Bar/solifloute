@@ -16,11 +16,21 @@ import { imageDataToDetectionInput } from '~/utils/image-io'
 const MODEL_URL = '/models/version-RFB-640.onnx'
 const FFMPEG_CORE_VERSION = '0.12.10'
 const FFMPEG_LOAD_TIMEOUT_MS = 30_000
+const MAX_BROWSER_VIDEO_DURATION_SECONDS = 60
+const MAX_BROWSER_VIDEO_PIXELS = 1280 * 720
+const DEPENDENCY_PROGRESS_END = 0.16
 const DEBUG_PREFIX = '[solifloute:browser-video]'
 
 interface VideoWithCaptureStream extends HTMLVideoElement {
   captureStream?: () => MediaStream
 }
+
+export interface BrowserVideoProgress {
+  progress: number
+  message: string
+}
+
+type BrowserVideoProgressHandler = (progress: BrowserVideoProgress) => void
 
 let ffmpegPromise: Promise<{
   ffmpeg: BrowserFFmpeg
@@ -55,9 +65,31 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   })
 }
 
-async function getBrowserFFmpeg() {
+function reportProgress(
+  onProgress: BrowserVideoProgressHandler | undefined,
+  progress: number,
+  message: string
+) {
+  onProgress?.({
+    progress: Math.max(0, Math.min(1, progress)),
+    message
+  })
+}
+
+function mapProcessingProgress(progress: number) {
+  return DEPENDENCY_PROGRESS_END + (progress * (1 - DEPENDENCY_PROGRESS_END))
+}
+
+async function getBrowserFFmpeg(onProgress?: BrowserVideoProgressHandler) {
+  const isFirstLoad = !ffmpegPromise
+
   if (!ffmpegPromise) {
     ffmpegPromise = (async () => {
+      reportProgress(
+        onProgress,
+        0.02,
+        'Preparation des dependances navigateur. Cela ne se produit que lors de la premiere utilisation sur ce navigateur.'
+      )
       debugLog('loading ffmpeg modules')
       const [{ FFmpeg }, { toBlobURL, fetchFile }] = await Promise.all([
         import('@ffmpeg/ffmpeg'),
@@ -67,6 +99,11 @@ async function getBrowserFFmpeg() {
       const coreBaseUrl = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm`
       debugLog('loading ffmpeg core', { classWorkerURL, coreBaseUrl })
 
+      reportProgress(
+        onProgress,
+        0.05,
+        'Telechargement de FFmpeg WebAssembly. Premiere utilisation uniquement, ensuite le navigateur le garde en cache.'
+      )
       const [coreURL, wasmURL] = await withTimeout(
         Promise.all([
           toBlobURL(`${coreBaseUrl}/ffmpeg-core.js`, 'text/javascript'),
@@ -77,6 +114,7 @@ async function getBrowserFFmpeg() {
       )
       debugLog('ffmpeg runtime assets ready')
 
+      reportProgress(onProgress, 0.09, 'Initialisation de FFmpeg dans le navigateur.')
       await withTimeout(
         ffmpeg.load({
           classWorkerURL,
@@ -87,6 +125,7 @@ async function getBrowserFFmpeg() {
         'Le runtime FFmpeg du navigateur ne repond pas. Verifiez l acces reseau au CDN ou utilisez le mode serveur.'
       )
       debugLog('ffmpeg core ready')
+      reportProgress(onProgress, 0.12, 'FFmpeg navigateur est pret.')
 
       return { ffmpeg, fetchFile }
     })().catch((error) => {
@@ -94,6 +133,10 @@ async function getBrowserFFmpeg() {
       ffmpegPromise = null
       throw error
     })
+  }
+
+  if (!isFirstLoad) {
+    reportProgress(onProgress, 0.12, 'FFmpeg navigateur est pret.')
   }
 
   return await ffmpegPromise
@@ -163,19 +206,39 @@ function normalizeErrorMessage(error: unknown) {
   return String(error)
 }
 
+async function deleteFFmpegFile(ffmpeg: BrowserFFmpeg, name: string) {
+  try {
+    await ffmpeg.deleteFile(name)
+  } catch {
+    // Missing temporary files are harmless during cleanup.
+  }
+}
+
 export async function processVideoInBrowser(
   file: File,
   settings: EditorSettings,
-  onProgress?: (progress: number) => void
+  onProgress?: BrowserVideoProgressHandler
 ) {
   debugLog('starting browser video processing', {
     fileName: file.name,
     fileSize: file.size,
     detectionIntervalSeconds: settings.detectionIntervalSeconds
   })
-  onProgress?.(0.01)
-  const { ffmpeg, fetchFile } = await getBrowserFFmpeg()
+  reportProgress(
+    onProgress,
+    0.01,
+    'Chargement des dependances navigateur: modele IA et FFmpeg WebAssembly. Cela ne se produit que lors de la premiere utilisation.'
+  )
+  const { ffmpeg, fetchFile } = await getBrowserFFmpeg(onProgress)
   const detector = useFaceDetector(MODEL_URL)
+  reportProgress(
+    onProgress,
+    0.13,
+    'Chargement du modele IA de detection. Premiere utilisation uniquement, ensuite il est garde en cache.'
+  )
+  await detector.warmup()
+  reportProgress(onProgress, DEPENDENCY_PROGRESS_END, 'Dependances pretes. Analyse de la video.')
+  const temporaryFileNames: string[] = []
   const sourceUrl = URL.createObjectURL(file)
   const video = document.createElement('video')
   const sourceCanvas = document.createElement('canvas')
@@ -199,12 +262,20 @@ export async function processVideoInBrowser(
   try {
     debugLog('waiting for video metadata')
     await waitForVideoMetadata(video)
-    onProgress?.(0.03)
+    reportProgress(onProgress, mapProcessingProgress(0.03), 'Lecture des informations de la video.')
 
     sourceCanvas.width = video.videoWidth
     sourceCanvas.height = video.videoHeight
     outputCanvas.width = video.videoWidth
     outputCanvas.height = video.videoHeight
+
+    if (video.duration > MAX_BROWSER_VIDEO_DURATION_SECONDS) {
+      throw new Error('Cette video est trop longue pour le traitement navigateur. Utilisez le mode serveur.')
+    }
+
+    if (video.videoWidth * video.videoHeight > MAX_BROWSER_VIDEO_PIXELS) {
+      throw new Error('Cette resolution video est trop elevee pour le traitement navigateur. Utilisez le mode serveur.')
+    }
 
     const fps = getVideoFps(video)
     const frameDuration = 1 / fps
@@ -214,6 +285,7 @@ export async function processVideoInBrowser(
     const jobId = crypto.randomUUID().replaceAll('-', '')
     const inputName = `${jobId}-input.${file.name.split('.').pop() || 'mp4'}`
     const outputName = `${jobId}-output.mp4`
+    temporaryFileNames.push(inputName, outputName)
     debugLog('video metadata ready', {
       width: video.videoWidth,
       height: video.videoHeight,
@@ -245,14 +317,22 @@ export async function processVideoInBrowser(
       frameCount,
       detectionIntervalFrames,
       detectFacesAtFrame,
-      onProgress
+      progress => reportProgress(
+        onProgress,
+        mapProcessingProgress(progress),
+        'Detection des visages dans la video.'
+      )
     )
     debugLog('face samples collected', { sampleCount: samples.length })
     const resolveFaces = createVideoFaceResolver(samples, fps)
 
     debugLog('writing input video to ffmpeg fs')
     await ffmpeg.writeFile(inputName, await fetchFile(file))
-    onProgress?.(VIDEO_PROGRESS_REFINEMENT_END)
+    reportProgress(
+      onProgress,
+      mapProcessingProgress(VIDEO_PROGRESS_REFINEMENT_END),
+      'Preparation des images video a flouter.'
+    )
 
     for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
       if (frameIndex === 0 || frameIndex % 30 === 0) {
@@ -275,18 +355,25 @@ export async function processVideoInBrowser(
       )
 
       previewContext.putImageData(processedImageData, 0, 0)
-      await ffmpeg.writeFile(
-        `${jobId}-frame-${String(frameIndex + 1).padStart(5, '0')}.png`,
-        await canvasToPngBytes(outputCanvas)
+      const frameName = `${jobId}-frame-${String(frameIndex + 1).padStart(5, '0')}.png`
+      temporaryFileNames.push(frameName)
+      await ffmpeg.writeFile(frameName, await canvasToPngBytes(outputCanvas))
+      reportProgress(
+        onProgress,
+        mapProcessingProgress(getFrameProcessingProgress(frameIndex, frameCount)),
+        'Floutage des images video.'
       )
-      onProgress?.(getFrameProcessingProgress(frameIndex, frameCount))
     }
 
     debugLog('encoding output video')
     let lastLoggedEncodingBucket = -1
     const handleEncodingProgress = ({ progress, time }: { progress: number, time: number }) => {
       const normalized = Math.max(0, Math.min(1, progress))
-      onProgress?.(VIDEO_PROGRESS_FRAME_END + (normalized * (1 - VIDEO_PROGRESS_FRAME_END)))
+      reportProgress(
+        onProgress,
+        mapProcessingProgress(VIDEO_PROGRESS_FRAME_END + (normalized * (1 - VIDEO_PROGRESS_FRAME_END))),
+        'Encodage de la video finale.'
+      )
       const bucket = Math.floor(normalized * 20)
 
       if (bucket !== lastLoggedEncodingBucket || normalized >= 1) {
@@ -356,12 +443,13 @@ export async function processVideoInBrowser(
     }
 
     debugLog('browser video processing completed', { bytes: data.byteLength })
-    onProgress?.(1)
+    reportProgress(onProgress, 1, 'Video traitee.')
     return new Blob([data.slice()], { type: 'video/mp4' })
   } catch (error) {
     console.error(`${DEBUG_PREFIX} processing failed`, error)
     throw error
   } finally {
+    await Promise.all(temporaryFileNames.map(name => deleteFFmpegFile(ffmpeg, name)))
     video.removeAttribute('src')
     URL.revokeObjectURL(sourceUrl)
   }

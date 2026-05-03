@@ -12,6 +12,7 @@ export type ProcessingMode = 'auto' | 'client' | 'server'
 export interface EditorSettings {
   confidenceThreshold: number
   detectionIntervalSeconds: number
+  blurIntensity: number
   processingMode: ProcessingMode
   excludedFaceIds: string[]
 }

@@ -1,12 +1,18 @@
 import type { Face } from '../types/faces'
 
-const BLUR_RADIUS = 12
-const PIXEL_BLOCK_SIZE = 12
+const MIN_BLUR_RADIUS = 2
+const MAX_BLUR_RADIUS = 22
+const MAX_BOOSTED_BLUR_RADIUS = MAX_BLUR_RADIUS * 2
 
 interface RasterImage {
   data: Uint8ClampedArray
   width: number
   height: number
+}
+
+interface BlurScratch {
+  temporary: Uint8ClampedArray
+  target: Uint8ClampedArray
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -19,6 +25,15 @@ function getPixelIndex(x: number, y: number, width: number) {
 
 function readByte(data: Uint8ClampedArray, index: number) {
   return data[index] ?? 0
+}
+
+function ensureBuffer(buffer: Uint8ClampedArray, length: number) {
+  return buffer.length >= length ? buffer : new Uint8ClampedArray(length)
+}
+
+function ensureScratch(scratch: BlurScratch, length: number) {
+  scratch.temporary = ensureBuffer(scratch.temporary, length)
+  scratch.target = ensureBuffer(scratch.target, length)
 }
 
 function createMaskChecker(face: Face) {
@@ -85,8 +100,10 @@ function averageBlock(data: Uint8ClampedArray, width: number, startX: number, st
   ]
 }
 
-function pixelateRegion(region: RasterImage, blockSize: number) {
-  const output = new Uint8ClampedArray(region.data)
+function pixelateRegion(region: RasterImage, blockSize: number, scratch: BlurScratch) {
+  ensureScratch(scratch, region.data.length)
+  const output = scratch.target
+  output.set(region.data)
 
   for (let y = 0; y < region.height; y += blockSize) {
     for (let x = 0; x < region.width; x += blockSize) {
@@ -185,39 +202,56 @@ function boxBlurVertical(input: Uint8ClampedArray, output: Uint8ClampedArray, wi
   }
 }
 
-function gaussianApproximation(region: RasterImage, radius: number) {
+function gaussianApproximation(region: RasterImage, radius: number, scratch: BlurScratch) {
   if (radius <= 1) {
     return new Uint8ClampedArray(region.data)
   }
 
-  let source = new Uint8ClampedArray(region.data)
-  const temporary = new Uint8ClampedArray(region.data.length)
-  const target = new Uint8ClampedArray(region.data.length)
+  ensureScratch(scratch, region.data.length)
 
   for (let pass = 0; pass < 3; pass += 1) {
-    boxBlurHorizontal(source, temporary, region.width, region.height, radius)
-    boxBlurVertical(temporary, target, region.width, region.height, radius)
-    source = new Uint8ClampedArray(target)
+    const source = pass === 0 ? region.data : scratch.target
+    boxBlurHorizontal(source, scratch.temporary, region.width, region.height, radius)
+    boxBlurVertical(scratch.temporary, scratch.target, region.width, region.height, radius)
   }
 
-  return source
+  return scratch.target
 }
 
-function blurRegion(region: RasterImage) {
-  if (Math.min(region.width, region.height) < BLUR_RADIUS) {
-    return pixelateRegion(region, PIXEL_BLOCK_SIZE)
+function resolveBlurRadius(blurIntensity: number) {
+  const sliderIntensity = Number.isFinite(blurIntensity) ? clamp(blurIntensity, 0, 1) : 0.5
+  const effectiveIntensity = sliderIntensity <= 0.5
+    ? 0.5 + sliderIntensity
+    : sliderIntensity * 2
+
+  if (effectiveIntensity > 1) {
+    return Math.round(MAX_BLUR_RADIUS + ((effectiveIntensity - 1) * (MAX_BOOSTED_BLUR_RADIUS - MAX_BLUR_RADIUS)))
   }
 
-  return gaussianApproximation(region, BLUR_RADIUS)
+  return Math.round(MIN_BLUR_RADIUS + (effectiveIntensity * (MAX_BLUR_RADIUS - MIN_BLUR_RADIUS)))
+}
+
+function blurRegion(region: RasterImage, radius: number, scratch: BlurScratch) {
+  if (Math.min(region.width, region.height) < radius) {
+    return pixelateRegion(region, Math.max(4, radius), scratch)
+  }
+
+  return gaussianApproximation(region, radius, scratch)
 }
 
 export function applyBlurEffects(
   image: RasterImage,
   faces: Face[],
-  excludedFaceIds: string[] = []
+  excludedFaceIds: string[] = [],
+  blurIntensity = 0.5
 ) {
   const output = new Uint8ClampedArray(image.data)
   const excludedFaces = new Set(excludedFaceIds)
+  const blurRadius = resolveBlurRadius(blurIntensity)
+  const scratch: BlurScratch = {
+    temporary: new Uint8ClampedArray(0),
+    target: new Uint8ClampedArray(0)
+  }
 
   for (const face of faces) {
     if (excludedFaces.has(face.id)) {
@@ -226,7 +260,7 @@ export function applyBlurEffects(
 
     const padding = Math.max(6, Math.round(Math.min(face.width, face.height) * 0.12))
     const region = extractRegion(image, face, padding)
-    const blurred = blurRegion(region)
+    const blurred = blurRegion(region, blurRadius, scratch)
     const isInsideFace = createMaskChecker(face)
 
     for (let y = 0; y < region.height; y += 1) {

@@ -15,10 +15,24 @@ const processingItems = computed(() => [
   { label: 'Serveur', value: 'server' }
 ])
 
+function normalizeSliderValue(value: number | number[]) {
+  const nextValue = Array.isArray(value) ? value[0] : value
+
+  return typeof nextValue === 'number' && Number.isFinite(nextValue) ? nextValue : 0
+}
+
 const detectionSensitivity = computed({
   get: () => Number((1 - settings.value.confidenceThreshold).toFixed(2)),
-  set: (value: number) => {
-    settings.value.confidenceThreshold = Number((1 - value).toFixed(2))
+  set: (value: number | number[]) => {
+    const nextValue = normalizeSliderValue(value)
+    settings.value.confidenceThreshold = Number((1 - nextValue).toFixed(2))
+  }
+})
+
+const blurIntensity = computed({
+  get: () => Number(settings.value.blurIntensity.toFixed(2)),
+  set: (value: number | number[]) => {
+    settings.value.blurIntensity = Number(normalizeSliderValue(value).toFixed(2))
   }
 })
 </script>
@@ -58,6 +72,19 @@ const detectionSensitivity = computed({
         </div>
         <USlider
           v-model="detectionSensitivity"
+          :min="0"
+          :max="1"
+          :step="0.01"
+        />
+      </div>
+
+      <div class="space-y-2">
+        <div class="flex items-center justify-between text-sm">
+          <span>Intensité du floutage</span>
+          <span class="font-semibold">{{ blurIntensity.toFixed(2) }}</span>
+        </div>
+        <USlider
+          v-model="blurIntensity"
           :min="0"
           :max="1"
           :step="0.01"
