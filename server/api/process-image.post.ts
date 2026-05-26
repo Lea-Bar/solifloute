@@ -29,8 +29,9 @@ async function blurImage(payload: ProcessImagePayload) {
   const image = await decodeImage(payload.imageBase64)
   const result = await detector.detectFaces(image, payload.settings.confidenceThreshold)
   const allFaces = [...result.faces, ...(payload.manualFaces || [])]
+  const format = payload.settings.outputFormat === 'jpeg' ? 'jpeg' : 'png'
 
-  return await sharp(
+  const pipeline = sharp(
     Buffer.from(applyBlurEffects(image, allFaces, payload.settings.excludedFaceIds, payload.settings.blurIntensity)),
     {
       raw: {
@@ -39,7 +40,13 @@ async function blurImage(payload: ProcessImagePayload) {
         channels: 4
       }
     }
-  ).png().toBuffer()
+  )
+
+  const buffer = format === 'jpeg'
+    ? await pipeline.flatten({ background: '#ffffff' }).jpeg({ quality: 90 }).toBuffer()
+    : await pipeline.png().toBuffer()
+
+  return { buffer, contentType: format === 'jpeg' ? 'image/jpeg' : 'image/png' }
 }
 
 export default defineEventHandler(async (event) => {
@@ -56,8 +63,8 @@ export default defineEventHandler(async (event) => {
     return await detectFaces(payload)
   }
 
-  const output = await blurImage(payload)
-  setHeader(event, 'content-type', 'image/png')
+  const { buffer, contentType } = await blurImage(payload)
+  setHeader(event, 'content-type', contentType)
   setHeader(event, 'cache-control', 'no-store')
-  return output
+  return buffer
 })

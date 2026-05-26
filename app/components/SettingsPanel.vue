@@ -15,6 +15,11 @@ const processingItems = computed(() => [
   { label: 'Serveur', value: 'server' }
 ])
 
+const outputFormatItems = [
+  { label: 'PNG (sans perte)', value: 'png' },
+  { label: 'JPG (plus leger)', value: 'jpeg' }
+]
+
 function normalizeSliderValue(value: number | number[]) {
   const nextValue = Array.isArray(value) ? value[0] : value
 
@@ -62,6 +67,13 @@ const blurIntensity = computed({
         <USelect
           v-model="settings.processingMode"
           :items="processingItems"
+        />
+      </UFormField>
+
+      <UFormField label="Format de sortie (image uniquement)">
+        <USelect
+          v-model="settings.outputFormat"
+          :items="outputFormatItems"
         />
       </UFormField>
 

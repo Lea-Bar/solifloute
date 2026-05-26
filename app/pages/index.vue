@@ -250,7 +250,7 @@ function isCurrentEntry(entryId: string) {
               <UButton
                 v-if="entry.processedPreviewUrl"
                 :href="entry.processedPreviewUrl"
-                :download="entry.mediaKind === 'video' ? 'visages-floutes.mp4' : 'visages-floutes.png'"
+                :download="entry.mediaKind === 'video' ? 'visages-floutes.mp4' : (isCurrentEntry(entry.id) ? editor.imageOutputName.value : 'visages-floutes.png')"
                 color="primary"
                 variant="soft"
               >

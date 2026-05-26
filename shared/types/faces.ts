@@ -15,6 +15,7 @@ export interface EditorSettings {
   blurIntensity: number
   processingMode: ProcessingMode
   excludedFaceIds: string[]
+  outputFormat: ImageOutputFormat
 }
 
 export interface DetectionInput {

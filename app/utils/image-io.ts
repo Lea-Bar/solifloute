@@ -1,4 +1,7 @@
 import type { DetectionInput } from '~~/shared/types/faces'
+import type { ImageOutputFormat } from '~~/shared/types/output'
+
+const JPEG_QUALITY = 0.9
 
 export async function fileToBase64(file: File) {
   return await new Promise<string>((resolve, reject) => {
@@ -49,7 +52,7 @@ export function imageDataToDetectionInput(imageData: ImageData): DetectionInput 
   }
 }
 
-export function imageDataToObjectUrl(imageData: ImageData) {
+export function imageDataToObjectUrl(imageData: ImageData, format: ImageOutputFormat = 'png') {
   const canvas = document.createElement('canvas')
   canvas.width = imageData.width
   canvas.height = imageData.height
@@ -61,6 +64,8 @@ export function imageDataToObjectUrl(imageData: ImageData) {
 
   context.putImageData(imageData, 0, 0)
 
+  const mimeType = getImageMimeType(format)
+
   return new Promise<string>((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (!blob) {
@@ -69,6 +74,14 @@ export function imageDataToObjectUrl(imageData: ImageData) {
       }
 
       resolve(URL.createObjectURL(blob))
-    }, 'image/png')
+    }, mimeType, format === 'jpeg' ? JPEG_QUALITY : undefined)
   })
+}
+
+export function getImageMimeType(format: ImageOutputFormat) {
+  return format === 'jpeg' ? 'image/jpeg' : 'image/png'
+}
+
+export function getImageExtension(format: ImageOutputFormat) {
+  return format === 'jpeg' ? 'jpg' : 'png'
 }

@@ -13,7 +13,8 @@ const DEFAULT_SETTINGS: EditorSettings = {
   detectionIntervalSeconds: 1,
   blurIntensity: 0.5,
   processingMode: 'auto',
-  excludedFaceIds: []
+  excludedFaceIds: [],
+  outputFormat: 'png'
 }
 
 type EditorStatus = 'idle' | 'detecting' | 'processing' | 'ready' | 'error' | 'cancelled'
@@ -139,6 +140,7 @@ export function useImageEditor() {
   const processingProgress = computed(() => currentEntry.value?.processingProgress ?? null)
   const processingMessage = computed(() => currentEntry.value?.processingMessage ?? '')
   const estimatedRemainingMs = computed(() => currentEntry.value?.estimatedRemainingMs ?? null)
+  const imageOutputName = computed(() => `visages-floutes.${getImageExtension(settings.outputFormat)}`)
 
   function revokeUrl(url: string) {
     if (url) {
@@ -216,7 +218,8 @@ export function useImageEditor() {
       detectionIntervalSeconds: settings.detectionIntervalSeconds,
       blurIntensity: settings.blurIntensity,
       processingMode: settings.processingMode,
-      excludedFaceIds: [...settings.excludedFaceIds]
+      excludedFaceIds: [...settings.excludedFaceIds],
+      outputFormat: settings.outputFormat
     }
   }
 
@@ -247,7 +250,7 @@ export function useImageEditor() {
       imageData.height
     )
 
-    await setProcessedPreview(await imageDataToObjectUrl(processedImageData))
+    await setProcessedPreview(await imageDataToObjectUrl(processedImageData, settings.outputFormat))
   }
 
   async function detectOnClient() {
@@ -390,7 +393,7 @@ export function useImageEditor() {
       faces: response.faces,
       durationMs: response.durationMs
     })
-    await setProcessedPreview(await imageDataToObjectUrl(response.processedImageData))
+    await setProcessedPreview(await imageDataToObjectUrl(response.processedImageData, settings.outputFormat))
   }
 
   async function processOnServer() {
@@ -662,7 +665,7 @@ export function useImageEditor() {
   })
 
   watch(
-    () => [settings.processingMode, settings.blurIntensity, settings.excludedFaceIds.join('|')],
+    () => [settings.processingMode, settings.blurIntensity, settings.excludedFaceIds.join('|'), settings.outputFormat],
     async () => {
       if (
         mediaKind.value !== 'image'
@@ -717,6 +720,7 @@ export function useImageEditor() {
     lastDurationMs,
     safariVideoModalOpen,
     isSafariVideoForcedToServer,
+    imageOutputName,
     loadFile,
     clear,
     detectFaces,
